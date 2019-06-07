@@ -1,0 +1,531 @@
+#!/bin/sh
+
+trap "exit 0" HUP
+trap "exit 1" TERM
+export TOP_PID=$$
+
+# script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+# project_dir="$(basename "$(dirname $script_dir)")"
+
+notify () {
+  [ -n "$COLUMNS" ] || COLUMNS=$(tput cols)
+  printf "\n"
+  printf "%*s" 65 | tr ' ' '-' | cut -c 1-${COLUMNS}
+  output="$(echo "$@" | tr '\n' ' ' | tr '\t' ' ' | sed -e 's/  */ /g' | fmt)"
+  printf "\n$output\n"
+  printf "%*s" 65 | tr ' ' '-' | cut -c 1-${COLUMNS}
+  printf "\n"
+}
+
+exception () (
+  printf "[ERROR] %s\\n" "$1" >&2
+  kill -s TERM $TOP_PID
+)
+
+usage () {
+  [ -n "$COLUMNS" ] || COLUMNS=$(tput cols)
+  printf "Usage:\n"
+  printf "  skiff [OPTIONS...] COMMAND ...\n\n"
+  printf "Set up a development cluster in Minikube and manage application deployments using Helm charts.\n\n" | fmt
+  printf "COMMANDS:\n"
+  printf "  launch              Provision a complete environment from scratch\n"
+  printf "  deploy              Deploy application to cluster\n"
+  printf "  delete              Delete deployment from cluster\n"
+  printf "  status              Show cluster status\n"
+  printf "  logs POD_QUERY      View logs (see \`stern --help\` for details)\n"
+  printf "  ssh APP [CONTAINER] Log into a pod's default container or, optionally, the one specified\n"
+  printf "  anchor              Shut down Minikube cluster when not in use\n"
+  printf "  sink                Completely destroy deployment and Minikube instance\n"
+  printf "  reconfigure COMPONENT\n"
+  printf "                      Reconfigure one of the setup steps\n\n"
+  printf "Reconfigure Commands:\n"
+  printf "  reconfigure certificate  Generate a new self-signed TLS certificate\n"
+  printf "  reconfigure dns          Update *.test domain to resolve to Minikube instance\n"
+  printf "  reconfigure ingress      Reprovision the NGINX Ingress Controller\n"
+  printf "  reconfigure nfs          Remount local codebase directory within Minikube\n"
+  printf "  reconfigure registry     Update private Docker registry credentials\n\n"
+  printf "OPTIONS:\n"
+  printf "  -h --help           Show this help\n"
+  kill -s HUP $TOP_PID
+}
+
+macos_installer() {
+  errors=false
+  for package in "$@"; do
+    case "$package" in
+      virtualbox) cask="cask" ;;
+      minikube) cask="cask" ;;
+      *) cask="" ;;
+    esac
+    printf "checking for ${package}...\n"
+    brew $cask list $package > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      brew $cask install $package
+      if [ $? -ne 0 ]; then
+        errors=true
+      fi
+    else
+      brew $cask outdated $package > /dev/null 2>&1
+      if [ $? -ne 0 ]; then
+        brew $cask upgrade $package
+        if [ $? -ne 0 ]; then
+          errors=true
+        fi
+      else
+        printf "$package already installed and up to date\n"
+      fi
+    fi
+  done
+  if $errors; then
+    exception "Errors were encountered during installation. Please check the log output and try again if necessary."
+  fi
+}
+
+get_network_settings () {
+  minikube_ip=$(minikube ip) || exception "could not determine Minikube's IP address"
+  printf $minikube_ip 2>/dev/null | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+  [ $? -eq 0 ] || exception "could not determine Minikube's IP address"
+  prefix="$(printf $minikube_ip | sed 's/[0-9]*$//')"
+  network="${prefix}0"
+
+  iface=$(netstat -nr | grep $minikube_ip | awk '{print $6}')
+  [ -n "$iface" ] || exception "could not determine VirtualBox network interface"
+
+  for i in 0 1 2; do
+    gateway=$(ifconfig ${iface}${i} 2>&1 | grep inet | awk '{print $2}')
+    [ -n "$gateway" ] || continue
+    if [ "$(printf $gateway | sed 's/[0-9]*$//')" = "$prefix" ]; then
+      break
+    else
+      gateway=""
+    fi
+  done
+  [ -n "$gateway" ] || exception "could not determine gateway to Minikube network"
+}
+
+mount_nfs_volume () {
+  notify "mounting NFS share inside Minikube"
+  minikube ssh -- sudo mkdir -p "$2"
+  minikube ssh -- sudo umount "$2" > /dev/null 2>&1 || true
+  minikube ssh -- sudo busybox mount -t nfs "${gateway}:${1} $2 -o rw,async,noatime,rsize=32768,wsize=32768,proto=tcp"
+  [ $? -eq 0 ] || exception "failed to mount NFS share"
+  printf "%s is mounted in the Minikube host node at %s\\n" "$1" "$2"
+}
+
+regex_safe () {
+  printf "$1" | sed 's/\\/\\\\/g' | sed 's/\//\\\//g' | sed 's/ /\\ /g' | sed 's/\./\\./g'
+}
+
+configure_nfs () {
+  notify "setting up NFS volume"
+  get_network_settings
+
+  src="$(printf "$nfs_source_dir" | sed 's/ /\\ /g')"
+  uid=$(id -u)
+  gid=$(id -g)
+  export=$(printf "%s -network %s -mask 255.255.255.0 -alldirs -mapall=%s:%s\\n" $src $network $uid $gid)
+
+  if ! grep -q "$export" /etc/exports; then
+    printf "setting up %s as an NFS share on %s/24\\n" "$src" $network
+  #   pattern="$(printf "$src" | sed 's/\\/\\\\/g' | sed 's/\//\\\//g' | sed 's/ /\\ /g' | sed 's/\./\\./g')"
+  #   replacement="$(printf "$export" | sed 's/\\/\\\\/g' | sed 's/\//\\\//g' | sed 's/ /\\ /g')"
+  #   export_regexp="$(printf "s/.*%s -network .* -mask 255\.255\.255\.0 -alldirs .*/%s/" "$pattern" "$replacement")"
+  #   sudo sed -i '' "$export_regexp" /etc/exports
+  # else
+    printf "$export\\n" | sudo tee -a /etc/exports > /dev/null
+    sudo nfsd enable > /dev/null 2>&1
+    sudo nfsd restart
+    [ $? -eq 0 ] || exception "failed to set up NFS export"
+    printf "The following NFS mount has been added to /etc/exports:\\n\\n"
+    printf "  %s\\n\\n" "$export"
+    printf "If you no longer need to share your local volume with Minikube, you can delete this line.\\n\\n"
+  else
+    printf "NFS share is configured correctly\n"
+  fi
+}
+
+generate_tls_certificate () {
+  if [ "$ingress_controller" != "enabled" ]; then
+    printf "ingress controller is disabled so TLS certificate is not required\n"
+    return 0
+  fi
+  [ -z "${domain:=}" ] && exception "please set the variable 'domain' in .skiffrc"
+  notify "self-signed TLS certificate"
+  certs_dir="ingress_controller_certs"
+  key_file="${certs_dir}/server.key"
+  cert_file="${certs_dir}/server.crt"
+  cert_name="default-tls-certificate"
+
+  rm -rf $certs_dir
+  mkdir -p $certs_dir
+
+  printf "generating new certificate for %s\\n" "$domain"
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout $key_file -out $cert_file -subj "/CN=*.${domain}/O=*.${domain}"
+  if [ $? -ne 0 ]; then
+    printf "certificate generation failed\n"
+    exit 1
+  fi
+
+  printf "saving certificate as a Kubernetes secret\\n"
+  kubectl get secret $cert_name > /dev/null 2>&1 && kubectl delete secret $cert_name
+  kubectl create secret tls $cert_name --key $key_file --cert $cert_file
+
+  rm -rf $certs_dir
+}
+
+setup_ingress_controller () {
+  if [ "$ingress_controller" != "enabled" ]; then
+    printf "ingress controller is disabled in %s\n" "$conf_file"
+  fi
+  notify "provisioning ingress controller"
+  # kubectl get namespace ingress-nginx > /dev/null 2>&1 || kubectl create namespace ingress-nginx
+  if ! kubectl get -n ingress-nginx deployment nginx-ingress-controller > /dev/null 2>&1; then
+    curl -k https://raw.githubusercontent.com/kubernetes/ingress-nginx/master/deploy/static/mandatory.yaml | \
+      sed -e '/- \/nginx-ingress-controller/a\'$'\n''\            - --default-ssl-certificate=\$(POD_NAMESPACE)\/default-ssl-certificate' | \
+      kubectl create -f -
+    [ $? -eq 0 ] || exception "failed to deploy ingress controller"
+  else
+    controller_pod="$(kubectl get -n ingress-nginx --no-headers pods | awk '{print $1}')"
+    kubectl delete -n ingress-nginx pod "$controller_pod"
+    [ $? -eq 0 ] || exception "failed to reprovision ingress controller"
+  fi
+#   kustomization="apiVersion: kustomize.config.k8s.io/v1beta1
+# kind: Kustomization
+# namespace: ingress-nginx
+# bases:
+# - github.com/kubernetes/ingress-nginx/deploy/cluster-wide"
+#   printf "%s\n" "$kustomization"
+#   printf "%s\n" "$kustomization" | kubectl apply -f -
+  if ! minikube addons list | grep -q 'ingress: enabled'; then
+    minikube addons enable ingress
+  fi
+
+#  set -- $(helm ls | grep '\tnginx-ingress')
+#  if [ -z "$1" ]; then
+#    helm install stable/nginx-ingress --set controller.extraArgs.default-tls-certificate='$(POD_NAMESPACE)/default-tls-certificate' --namespace ingress-nginx
+#  else
+#    helm upgrade "$1" stable/nginx-ingress --set controller.extraArgs.default-tls-certificate='$(POD_NAMESPACE)/default-tls-certificate' --namespace ingress-nginx
+#  fi
+  printf "The ingress controller is configured to forward traffic to any service bearing the annotation:\n"
+  printf "  kubernetes.io/ingress.class: \"nginx\"\n"
+}
+
+update_local_dns () {
+  minikube_ip=$(minikube ip) || exception "could not determine Minikube's IP address"
+  printf $minikube_ip 2>/dev/null | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+  [ $? -eq 0 ] || exception "could not determine Minikube's IP address"
+  notify "updating local DNS resolver"
+
+  # update dnsmasq configuration if Minikube's IP address has changed
+  if [ "$(uname -s)" = "Darwin" ]; then
+    dnsmasq_conf="$(brew --prefix)/etc/dnsmasq.d/${domain}"
+    [ -f "$(brew --prefix)/etc/dnsmasq.conf" ] || exception "could not find dnsmasq.conf"
+    safe_domain="$(printf "$domain" | sed 's/\./\\\./g')"
+    if grep -q "^address=\/\.${safe_domain}\/${minikube_ip}" $dnsmasq_conf > /dev/null 2>&1; then
+      printf "*.%s correctly resolves to Minikube IP address\\n" "$domain"
+    else
+      if grep -q "^address=\/\.${safe_domain}\/" $dnsmasq_conf > /dev/null 2>&1; then
+        printf "replacing old record\\n"
+        sed -i '' "s/^address=\/\.${safe_domain}\/.*/address=\/\.${safe_domain}\/${minikube_ip}/" $dnsmasq_conf
+      else
+        printf "inserting Minikube IP\\n"
+        printf "address=/.%s/%s\\n" "$domain" "$minikube_ip" >> $dnsmasq_conf
+      fi
+      printf "updated *.%s to resolve to Minikube (%s)\\n" "$domain" "$minikube_ip"
+      printf "restarting dnsmasq\\n"
+      sudo brew services restart dnsmasq
+    fi
+  fi
+}
+
+import_docker_credentials () {
+  [ -z "${docker_registry:=}" ] && exception "Docker registry not set in %s" "$conf_file"
+  notify "storing Docker credentials as a Kubernetes secret"
+  printf "Please enter your credentials for %s\\n" "$docker_registry"
+  printf "username: "
+  read username
+  printf "email: "
+  read email
+  printf "password: "
+  stty -echo
+  read password
+  stty echo
+  printf "\\n"
+
+  auth=$(printf "%s:%s" "$username" "$password" | base64)
+
+  dockerconfig=$(printf '{
+  "auths": {
+    "https://URI" : {
+      "auth": "AUTH",
+      "email": "EMAIL"
+    }
+  }
+}' | \
+    sed "s/URI/${docker_registry}/" | \
+    sed "s/AUTH/${auth}/" | \
+    sed "s/EMAIL/${email}/" | \
+    base64)
+
+  printf "apiVersion: v1
+kind: Secret
+metadata:
+  name: %s
+  namespace: default
+data:
+  .dockerconfigjson: %s
+type: kubernetes.io/dockerconfigjson" "$docker_registry" "$dockerconfig" | \
+  kubectl apply -f -
+}
+
+deploy () {
+  # check if chart is already installed
+  [ -n "${chart_values:=}" ] && values="-f ${chart_dir}/${chart_values}" || values=""
+  release_regexp="$(printf "\\\s%s-[0-9]" "$project_name")"
+  set -- $(helm ls | grep "$release_regexp")
+  if [ -n "$1" ]; then
+    notify "upgrading deployment '$1'"
+    if [ -n "${chart_values:=}" ]; then
+      helm upgrade -f ${chart_dir}/${chart_values} "$1" "$chart_dir"
+    else
+      helm upgrade "$1" "$chart_dir"
+    fi
+    [ $? -eq 0 ] && exit 0 || exception "deployment failed"
+  fi
+
+  # install the chart
+  notify "deploying ${project_name}"
+  if [ -n "${chart_values:=}" ]; then
+    helm install -f ${chart_dir}/${chart_values} "$chart_dir"
+  else
+    helm install "$chart_dir"
+  fi
+  [ $? -ne 0 ] && exception "deployment failed"
+  message="$project_name has been deployed."
+  if [ -n "$ingress_controller" ]; then
+    message="${message} Open a browser and navigate to www.${domain}"
+  fi
+  notify "$message"
+}
+
+delete () {
+  release_regexp="$(printf "\\\s%s-[0-9]" "$project_name")"
+  set -- $(helm ls | grep "$release_regexp")
+  if [ -z "$1" ]; then
+    printf "chart '%s' not found\\n" "$project_name"
+    exit 1
+  else
+    notify "deleting deployment '$1'"
+    helm delete --purge "$1"
+  fi
+}
+
+ssh () {
+  pod=$(kubectl get pods | grep "$1" | cut -d' ' -f1)
+  [ -z $pod ] && exception "could not find a matching pod"
+  if [ -n "$2" ]; then
+    kubectl exec -it $pod --container "$2" -- /bin/sh
+  else
+    kubectl exec -it $pod -- /bin/sh
+  fi
+}
+
+launch() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    if ! which -s brew; then
+      notify "Homebrew does not appear to be installed on your system.
+      While it's not required for this project, this setup script uses Homebrew
+      to ensure the necessary tools are installed.  If this is not what you want
+      to do, cancel this script and follow the manual setup procedure in the README."
+      printf "\nWould you like to install Homebrew? (y/n)  "
+      read yn
+      if [ "$yn" = "y" ]; then
+        if ! which -s ruby; then
+          exception "Ruby interpreter not found"
+        fi
+        ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+      else
+        exit 0
+      fi
+    fi
+    notify "installing software"
+    macos_installer virtualbox minikube kubernetes-helm dnsmasq stern
+
+    notify "configuring local DNS resolver for *.test domain"
+    if ! grep -q 'conf-dir=.*dnsmasq\.d$' "$(brew --prefix)/etc/dnsmasq.conf"; then
+      sed -i '' '/^#conf-dir=.*dnsmasq\.d$/s/^#//' "$(brew --prefix)/etc/dnsmasq.conf"
+      sudo brew services restart dnsmasq
+      dnsmasq_status="$(brew services list | grep dnsmasq)"
+      if [ -z "$dnsmasq_status" ]; then
+        exception "dnsmasq failed to start"
+      fi
+    fi
+    [ -d /etc/resolver ] || sudo mkdir -pv /etc/resolver
+    if ! grep -q 'nameserver.*127\.0\.0\.1' /etc/resolver/test; then
+      printf "adding localhost as a nameserver\n"
+      echo 'nameserver 127\.0\.0\.1' | sudo tee -a /etc/resolver/test
+      sudo killall mDNSResponder
+    else
+      printf "dnsmasq is configured correctly\n"
+    fi
+    if ! scutil --dns | grep -q 'domain.*: test'; then
+      exception "mDNSResponder is not forwarding queries for *.test to dnsmasq"
+    fi
+  else
+    exception "%s not supported yet" "$(uname -s)"
+  fi
+
+  notify "setting up Kubernetes cluster (might take a while)"
+  minikube_status="$(minikube status)"
+  if [ $? -eq 0 ]; then
+    printf "Minikube is already running\n"
+  else
+    if printf "$minikube_status" | grep -q "newer version of minikube available"; then
+      brew cask upgrade minikube || exception "failed to upgrade Minikube"
+    fi
+    minikube start || exception "Minikube failed to start"
+  fi
+  if ! helm ls > /dev/null 2>&1; then
+    helm init --upgrade || exception "failed to install Helm"
+  fi
+
+  configure_nfs
+  mount_nfs_volume "$nfs_source_dir" "$nfs_dest_dir"
+
+  if ! kubectl get secret default-tls-certificate > /dev/null 2>&1; then
+    generate_tls_certificate
+    new_cert=true
+  else
+    notify "self-signed TLS certificate"
+    printf "certificate already exists\n"
+    new_cert=false
+  fi
+  if [ "$new_cert" = true ] || \
+    ! kubectl get namespace ingress-nginx > /dev/null 2>&1 || \
+    ! kubectl get -n ingress-nginx deployment nginx-ingress-controller > /dev/null 2>&1 || \
+    ! minikube addons list | grep -q 'ingress: enabled'; then
+        setup_ingress_controller
+  else
+    notify "provisioning ingress controller"
+    printf "ingress controller is already set up\n"
+  fi
+
+  update_local_dns
+
+  if ! kubectl get secret "$docker_registry" > /dev/null 2>&1; then
+    import_docker_credentials
+  fi
+
+  deploy
+}
+
+# initialize variables from conf file
+conf_file=
+ingress_controller=enabled
+cwd="$(pwd)"
+while [ "$cwd" != "/" ]; do
+    if [ -f "${cwd}/.skiffrc" ]; then
+        conf_file="${cwd}/.skiffrc"
+        # shellcheck source=.skiffrc
+        . "$conf_file"
+        break
+    else
+        cwd="$(dirname "$cwd")"
+    fi
+done
+
+# override with environment variables, if set
+[ -n "${PROJECT_DIR:=}" ] && project_dir="$PROJECT_DIR"
+[ -n "${PROJECT_NAME:=}" ] && project_name="$PROJECT_NAME"
+
+# set sane defaults if not specified
+if [ -z "$project_dir" ]; then
+  if [ -n "$conf_file" ]; then
+    project_dir="$(dirname "$conf_file")"
+  else
+    exception "could not determine project_dir from .skiffrc or environment variable\n"
+  fi
+fi
+[ -z "$project_name" ] && project_name="$(basename "$project_dir")"
+[ -z "$chart_dir" ] && chart_dir="${project_dir}/helm/${project_name}"
+[ -d "$chart_dir" ] || exception "could not find Helm chart directory"
+[ -z "$nfs_source_dir" ] && nfs_source_dir="$project_dir"
+printf "$nfs_source_dir" | egrep -qv '^\/|^\.\/'
+[ $? -eq 0 ] && nfs_source_dir="${project_dir}/${nfs_source_dir}"
+[ -z "$nfs_dest_dir" ] && nfs_dest_dir="/mnt/${project_name}"
+if [ "$ingress_controller" = "enabled" ]; then
+  [ -z "$domain" ] && exception "please set the variable 'domain' in .skiffrc"
+fi
+
+# parse arguments
+ARGS=""
+while [ $# -gt 0 ]; do
+  unset OPTIND
+  unset OPTARG
+  while getopts ":h-:" opt; do
+    case ${opt} in
+      - )
+        case "${OPTARG}" in
+          help ) usage ;;
+          * ) exception "unknown option --${OPTARG}" ;;
+        esac ;;
+      h ) usage;;
+      \? ) exception "invalid option: -$OPTARG" ;;
+    esac
+  done
+  shift $((OPTIND-1))
+  ARGS="${ARGS} $1 "
+  shift
+done
+if [ -z "$ARGS" ]; then
+  usage
+fi
+ARGS="$(printf "$ARGS" | sed 's/^ //')"
+
+command="$(printf "$ARGS" | cut -d' ' -f1)"
+ARGS="$(printf "$ARGS" | sed 's/[^ ]* *//')"
+if [ "$command" = "launch" ]; then
+  launch
+elif [ "$command" = "help" ]; then
+  usage
+elif [ "$command" = "deploy" ]; then
+  deploy
+elif [ "$command" = "delete" ]; then
+  delete
+elif [ "$command" = "status" ]; then
+  minikube status > /dev/null 2>&1 && kubectl get all || printf "Minikube is not running\n"
+elif [ "$command" = "logs" ]; then
+  arg1="$(printf "$ARGS" | awk '{print $1}')"
+  if [ -z "$arg1" ]; then
+    usage
+  else
+    stern $ARGS
+  fi
+elif [ "$command" = "ssh" ]; then
+  arg1="$(printf "$ARGS" | awk '{print $1}')"
+  arg2="$(printf "$ARGS" | awk '{print $2}')"
+  if [ -z "$arg1" ]; then
+    minikube ssh
+  else
+    ssh "$arg1" "$arg2"
+  fi
+elif [ "$command" = "anchor" ]; then
+  minikube stop
+elif [ "$command" = "sink" ]; then
+  delete
+  minikube stop
+  minikube delete
+elif [ "$command" = "reconfigure" ]; then
+  arg="$(printf "$ARGS" | cut -d' ' -f1)"
+  [ -z "$arg" ] && usage
+  case ${arg} in
+    certificate) generate_tls_certificate ; setup_ingress_controller s;;
+    dns) update_local_dns ;;
+    ingress) setup_ingress_controller ;;
+    nfs) configure_nfs && mount_nfs_volume ;;
+    registry) import_docker_credentials ;;
+    \?) usage ;;
+  esac
+else
+  usage
+fi

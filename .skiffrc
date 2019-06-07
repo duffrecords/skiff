@@ -1,0 +1,9 @@
+project_dir=
+project_name=
+chart_dir=
+chart_values=
+nfs_source_dir=
+nfs_dest_dir=
+ingress_controller=enabled
+domain=example.test
+docker_registry=
