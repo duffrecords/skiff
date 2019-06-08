@@ -53,7 +53,7 @@ Delete a deployed application from Minikube
 `skiff status`  
 Show the cluster status
 
-`skiff logs {pod-query}`  
+`skiff logs [pod-query]`  
 Tail logs on one or more pods.  Skiff installs the excellent Kubernetes log utility [Stern](https://github.com/wercker/stern) as a dependency.  Stern accepts regular expressions and a wide range of options.  Rather than try to reproduce its functionality, Skiff simply passes all of its command line arguments to Stern.
 
 `skiff ssh [application]`  

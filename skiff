@@ -51,6 +51,7 @@ usage () {
   printf "  reconfigure registry     Update private Docker registry credentials\n\n"
   printf "OPTIONS:\n"
   printf "  -h --help           Show this help\n"
+  printf "     --version        Print the version number and exit\n"
   kill -s HUP $TOP_PID
 }
 
