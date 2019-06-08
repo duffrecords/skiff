@@ -25,14 +25,15 @@ exception () (
 usage () {
   [ -n "$COLUMNS" ] || COLUMNS=$(tput cols)
   printf "Usage:\n"
-  printf "  skiff [OPTIONS...] COMMAND ...\n\n"
+  printf "  skiff COMMAND [SUBCOMMAND] [OPTIONS...]\n\n"
   printf "Set up a development cluster in Minikube and manage application deployments using Helm charts.\n\n" | fmt
   printf "COMMANDS:\n"
   printf "  launch              Provision a complete environment from scratch\n"
   printf "  deploy              Deploy application to cluster\n"
   printf "  delete              Delete deployment from cluster\n"
   printf "  status              Show cluster status\n"
-  printf "  logs POD_QUERY      View logs (see \`stern --help\` for details)\n"
+  printf "  logs [POD_QUERY] [FLAGS]\n"
+  printf "                      View logs (see 'stern --help' for details)\n"
   printf "  ssh APP [CONTAINER] Log into a pod's default container or, optionally, the one specified\n"
   printf "  anchor              Shut down Minikube cluster when not in use\n"
   printf "  sink                Completely destroy deployment and Minikube instance\n"
@@ -457,19 +458,32 @@ if [ "$ingress_controller" = "enabled" ]; then
   [ -z "$domain" ] && exception "please set the variable 'domain' in .skiffrc"
 fi
 
+append_stern_args () {
+  if printf "$ORIG_ARGS" | grep -q "^logs "; then
+    ARGS="${ARGS} $1"
+  else
+    usage
+  fi
+}
+
 # parse arguments
+ORIG_ARGS="$*"
 ARGS=""
 while [ $# -gt 0 ]; do
   unset OPTIND
   unset OPTARG
-  while getopts ":h-:" opt; do
+  while getopts ":ceEhlnost-:" opt; do
     case ${opt} in
       - )
         case "${OPTARG}" in
           help ) usage ;;
+          container|exclude-container|container-state|since|context|exclude|namespace|kubeconfig|all-namespaces|selector|tail|color|output|timestamps|template )
+            append_stern_args "$1" ;;
           * ) exception "unknown option --${OPTARG}" ;;
         esac ;;
-      h ) usage;;
+      c|e|E|l|n|o|s|t )
+        append_stern_args "$1" ;;
+      h ) usage ;;
       \? ) exception "invalid option: -$OPTARG" ;;
     esac
   done
@@ -495,9 +509,9 @@ elif [ "$command" = "delete" ]; then
 elif [ "$command" = "status" ]; then
   minikube status > /dev/null 2>&1 && kubectl get all || printf "Minikube is not running\n"
 elif [ "$command" = "logs" ]; then
-  arg1="$(printf "$ARGS" | awk '{print $1}')"
+  arg1="$(printf -- "$ARGS" | awk '{print $1}')"
   if [ -z "$arg1" ]; then
-    usage
+    stern "$project_name"
   else
     stern $ARGS
   fi
@@ -522,7 +536,7 @@ elif [ "$command" = "reconfigure" ]; then
     certificate) generate_tls_certificate ; setup_ingress_controller s;;
     dns) update_local_dns ;;
     ingress) setup_ingress_controller ;;
-    nfs) configure_nfs && mount_nfs_volume ;;
+    nfs) configure_nfs && mount_nfs_volume "$nfs_source_dir" "$nfs_dest_dir";;
     registry) import_docker_credentials ;;
     \?) usage ;;
   esac
