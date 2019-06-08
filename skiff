@@ -38,7 +38,8 @@ usage () {
   printf "  status              Show cluster status\n"
   printf "  logs [POD_QUERY] [FLAGS]\n"
   printf "                      View logs (see 'stern --help' for details)\n"
-  printf "  ssh APP [CONTAINER] Log into a pod's default container or, optionally, the one specified\n"
+  printf "  ssh APP [CONTAINER] [-c command]"
+  printf "                      Log into a pod's default container or, optionally, the one specified\n"
   printf "  anchor              Shut down Minikube cluster when not in use\n"
   printf "  sink                Completely destroy deployment and Minikube instance\n"
   printf "  reconfigure COMPONENT\n"
@@ -328,10 +329,11 @@ delete () {
 ssh () {
   pod=$(kubectl get pods | grep "$1" | cut -d' ' -f1)
   [ -z $pod ] && exception "could not find a matching pod"
+  [ -n "$3" ] && shell_command="$3" || shell_command=/bin/sh
   if [ -n "$2" ]; then
-    kubectl exec -it $pod --container "$2" -- /bin/sh
+    kubectl exec -it $pod --container "$2" -- $shell_command
   else
-    kubectl exec -it $pod -- /bin/sh
+    kubectl exec -it $pod -- $shell_command
   fi
 }
 
@@ -487,7 +489,12 @@ while [ $# -gt 0 ]; do
           * ) exception "unknown option --${OPTARG}" ;;
         esac ;;
       c|e|E|l|n|o|s|t )
-        append_stern_args "$1" ;;
+        if printf "$ORIG_ARGS" | grep -q "^ssh "; then
+          ARGS="$ARGS $1"
+        else
+          append_stern_args "$1"
+        fi
+        ;;
       h ) usage ;;
       \? ) exception "invalid option: -$OPTARG" ;;
     esac
@@ -521,12 +528,22 @@ elif [ "$command" = "logs" ]; then
     stern $ARGS
   fi
 elif [ "$command" = "ssh" ]; then
-  arg1="$(printf "$ARGS" | awk '{print $1}')"
-  arg2="$(printf "$ARGS" | awk '{print $2}')"
-  if [ -z "$arg1" ]; then
-    minikube ssh
+  if printf -- "$ARGS" | grep -q '^-'; then
+    arg1=""
+    arg2=""
   else
-    ssh "$arg1" "$arg2"
+    arg1="$(printf -- "$ARGS" | sed 's/[^a-zA-Z0-9]*-c.*//' | awk '{print $1}' | sed 's/^-.*//')"
+    arg2="$(printf -- "$ARGS" | sed 's/[^a-zA-Z0-9]*-c.*//' | awk '{print $2}' | sed 's/^-.*//')"
+  fi
+  if printf -- "$ARGS" | grep -q '[^a-zA-Z0-9]*-c '; then
+    arg3="$(printf -- "$ARGS" | sed 's/.*-c //')"
+  else
+    arg3=""
+  fi
+  if [ -z "$arg1" ]; then
+    minikube ssh $arg3
+  else
+    ssh "$arg1" "$arg2" "$arg3"
   fi
 elif [ "$command" = "anchor" ]; then
   minikube stop
