@@ -4,8 +4,12 @@ trap "exit 0" HUP
 trap "exit 1" TERM
 export TOP_PID=$$
 
-# script_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
-# project_dir="$(basename "$(dirname $script_dir)")"
+version="0.1"
+
+print_version () {
+  printf "${version}\n"
+  kill -s HUP $TOP_PID
+}
 
 notify () {
   [ -n "$COLUMNS" ] || COLUMNS=$(tput cols)
@@ -281,7 +285,6 @@ type: kubernetes.io/dockerconfigjson" "$docker_registry" "$dockerconfig" | \
 
 deploy () {
   # check if chart is already installed
-  [ -n "${chart_values:=}" ] && values="-f ${chart_dir}/${chart_values}" || values=""
   release_regexp="$(printf "\\\s%s-[0-9]" "$project_name")"
   set -- $(helm ls | grep "$release_regexp")
   if [ -n "$1" ]; then
@@ -479,6 +482,7 @@ while [ $# -gt 0 ]; do
           help ) usage ;;
           container|exclude-container|container-state|since|context|exclude|namespace|kubeconfig|all-namespaces|selector|tail|color|output|timestamps|template )
             append_stern_args "$1" ;;
+          version ) print_version ;;
           * ) exception "unknown option --${OPTARG}" ;;
         esac ;;
       c|e|E|l|n|o|s|t )
