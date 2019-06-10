@@ -1,6 +1,8 @@
 # skiff
 a tool for provisioning [Minikube](https://github.com/kubernetes/minikube) and deploying [Helm](https://helm.sh/) charts.
 
+<img src="https://github.com/duffrecords/skiff/raw/master/logo.png" height="100" />
+
 The goal is to stand up a development environment with a single command, so developers can start working on the application right away without spending time configuring boilerplate stuff.  It's essentially a wrapper script for [Minikube](https://github.com/kubernetes/minikube) and [Helm](https://helm.sh/) that attempts set up a default configuration and handle errors gracefully during the process.
 ### TL;DR
 To get started, copy `skiff` to a location in your `$PATH` (such as `/usr/local/bin`), optionally add a `.skiffrc` to the root of your project directory, and run the following command:  
