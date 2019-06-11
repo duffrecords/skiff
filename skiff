@@ -395,6 +395,8 @@ launch() {
   if ! helm ls > /dev/null 2>&1; then
     helm init --upgrade || exception "failed to install Helm"
   fi
+  # set promiscuous mode on bridge to allow pods to route to their own service IPs
+  minikube ssh -- "ip link show docker0 | grep -q PROMISC || sudo ip link set docker0 promisc on"
 
   configure_nfs
   mount_nfs_volume "$nfs_source_dir" "$nfs_dest_dir"
