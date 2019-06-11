@@ -356,7 +356,7 @@ launch() {
       fi
     fi
     notify "installing software"
-    macos_installer virtualbox minikube kubernetes-helm dnsmasq stern
+    macos_installer openssl virtualbox minikube kubernetes-helm dnsmasq stern
 
     notify "configuring local DNS resolver for *.test domain"
     if ! grep -q 'conf-dir=.*dnsmasq\.d$' "$(brew --prefix)/etc/dnsmasq.conf"; then
