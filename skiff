@@ -15,7 +15,7 @@ notify () {
   [ -n "$COLUMNS" ] || COLUMNS=$(tput cols)
   printf "\n"
   printf "%*s" 65 | tr ' ' '-' | cut -c 1-${COLUMNS}
-  output="$(echo "$@" | tr '\n' ' ' | tr '\t' ' ' | sed -e 's/  */ /g' | fmt)"
+  output="$(printf "$@" | tr '\n' ' ' | tr '\t' ' ' | sed -e 's/  */ /g' | fmt)"
   printf "\n$output\n"
   printf "%*s" 65 | tr ' ' '-' | cut -c 1-${COLUMNS}
   printf "\n"
@@ -370,7 +370,7 @@ launch() {
     [ -d /etc/resolver ] || sudo mkdir -pv /etc/resolver
     if ! grep -q 'nameserver.*127\.0\.0\.1' /etc/resolver/test; then
       printf "adding localhost as a nameserver\n"
-      echo 'nameserver 127\.0\.0\.1' | sudo tee -a /etc/resolver/test
+      printf 'nameserver 127.0.0.1' | sudo tee -a /etc/resolver/test
       sudo killall mDNSResponder
     else
       printf "dnsmasq is configured correctly\n"
