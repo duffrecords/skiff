@@ -327,7 +327,7 @@ delete () {
 }
 
 ssh () {
-  pod=$(kubectl get pods | grep "$1" | cut -d' ' -f1)
+  pod=$(kubectl get pods | grep "$1" | cut -d' ' -f1 | head -n 1)
   [ -z $pod ] && exception "could not find a matching pod"
   [ -n "$3" ] && shell_command="$3" || shell_command=/bin/sh
   if [ -n "$2" ]; then
