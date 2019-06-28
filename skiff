@@ -286,15 +286,18 @@ type: kubernetes.io/dockerconfigjson" "$docker_registry" "$dockerconfig" | \
 }
 
 deploy () {
+  # include values from environment variables
+  extra_args="$(env | grep '^skiff_' | sed 's/^skiff_global_/--set global\./g' | sed 's/^skiff_/--set /g')"
+  printf -- "$extra_args\n"
   # check if chart is already installed
   release_regexp="$(printf "\\\s%s-[0-9]" "$project_name")"
   set -- $(helm ls | grep "$release_regexp")
   if [ -n "$1" ]; then
     notify "upgrading deployment '$1'"
     if [ -n "${chart_values:=}" ]; then
-      helm upgrade -f ${chart_dir}/${chart_values} "$1" "$chart_dir"
+      eval helm upgrade -f "${chart_dir}/${chart_values}" $extra_args "$1" "$chart_dir"
     else
-      helm upgrade "$1" "$chart_dir"
+      eval helm upgrade $extra_args "$1" "$chart_dir"
     fi
     [ $? -eq 0 ] && exit 0 || exception "deployment failed"
   fi
@@ -302,9 +305,9 @@ deploy () {
   # install the chart
   notify "deploying ${project_name}"
   if [ -n "${chart_values:=}" ]; then
-    helm install -f ${chart_dir}/${chart_values} "$chart_dir"
+    eval helm install -f ${chart_dir}/${chart_values} $extra_args "$chart_dir"
   else
-    helm install "$chart_dir"
+    eval helm install $extra_args "$chart_dir"
   fi
   [ $? -ne 0 ] && exception "deployment failed"
   message="$project_name has been deployed."

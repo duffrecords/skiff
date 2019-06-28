@@ -40,6 +40,19 @@ Skiff can be customized with a `.skiffrc` file in the root of your project conta
 | `domain` | private domain in the form "yourdomain.test" |
 | `docker_registry` | URI of a private Docker registry, if used |
 
+In skiff v0.2.5 and later, you can add custom variables beginning with the prefix `skiff_`.  The prefix will be removed and the remainder of the key/value pair will be passed to Helm as a `--set` command line argument.  The prefix `skiff_global_` will add the variable to the `global` dictionary (useful if you have sub-charts).  For example:
+
+```
+skiff_foo=bar
+skiff_global_hello=world
+```
+
+would result in:
+
+```
+helm --set foo=bar --set global.hello=world ...
+```
+
 ---
 
 ### Command Reference
